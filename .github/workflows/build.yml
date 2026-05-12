@@ -1,0 +1,30 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet restore src/Fleans.CustomWorkerHost
+      - run: dotnet build src/Fleans.CustomWorkerHost --no-restore --configuration Release
+
+      # Leaf-package guard: verify engine internals never sneak into the dep closure.
+      # This is the structural invariant that justifies hosting plugins out-of-process.
+      - name: Verify no engine-internal transitive packages
+        run: |
+          set -euo pipefail
+          deps=$(dotnet list src/Fleans.CustomWorkerHost package --include-transitive)
+          if echo "$deps" | grep -E '> Fleans\.(Application|Domain|Infrastructure|Persistence)( |$)' | grep -v '\.Abstractions '; then
+            echo "::error::Engine-internal package leaked into transitive closure — leaf-package design broken"
+            exit 1
+          fi
+          echo "OK — dep closure contains only Fleans.*.Abstractions / Worker / Plugins.*"

@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>14</LangVersion>
+    <UserSecretsId>fleans-custom-worker-example-9c6f43b0</UserSecretsId>
+    <!-- Worked example for the "host your own custom-task plugins" pattern.
+         Dependency closure here is intentionally minimal: Fleans.Worker (the leaf NuGet)
+         + the plugin packages your host claims + Orleans server + Aspire telemetry.
+         No reference to Fleans.Application / Fleans.Domain / Fleans.Persistence — that
+         is the structural guarantee the leaf-package design buys you.
+         To verify: dotnet list package (with the transitive flag) should show no Fleans.Domain
+         (only Fleans.Domain.Abstractions) and no Fleans.Application (only Fleans.Application.Abstractions). -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Fleans plugin host surface. Pinned to the version that introduced the leaf-package layout. -->
+    <PackageReference Include="Fleans.Worker" Version="0.2.0" />
+    <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Orleans server stack — Server brings Redis clustering/persistence + reminder service. -->
+    <PackageReference Include="Microsoft.Orleans.Server" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Orleans.Clustering.Redis" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Orleans.Persistence.Redis" Version="10.0.1" />
+    <PackageReference Include="Microsoft.Orleans.Streaming" Version="10.0.1" />
+    <PackageReference Include="Aspire.StackExchange.Redis" Version="13.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Minimal Aspire service-defaults stack (inlined in Program.cs).
+         OpenTelemetry + service discovery + standard HTTP resilience. -->
+    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="10.1.0" />
+    <PackageReference Include="Microsoft.Extensions.ServiceDiscovery" Version="10.1.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.14.0" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.14.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.14.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.14.0" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" Version="1.14.0" />
+  </ItemGroup>
+
+</Project>
