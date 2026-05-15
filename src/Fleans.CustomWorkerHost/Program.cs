@@ -1,9 +1,12 @@
 using Fleans.Plugins.RestCaller;
 using Fleans.Worker.Placement;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
+using Orleans.Configuration;
 using StackExchange.Redis;
+using Universley.OrleansContrib.StreamsProvider.Redis;
 
 // Worked example: a minimal-viable Fleans plugin worker silo.
 //
@@ -58,6 +61,24 @@ builder.Services.AddHealthChecks()
 // ─── Redis connection (Aspire injects ConnectionStrings:orleans-redis at runtime) ───
 builder.AddKeyedRedisClient("orleans-redis");
 
+// The Universley Redis Streams provider resolves a non-keyed IConnectionMultiplexer from DI.
+// Alias the Aspire-registered keyed one so the same connection pool serves clustering,
+// PubSubStore, and the stream provider — no second socket.
+builder.Services.TryAddSingleton<IConnectionMultiplexer>(sp =>
+    sp.GetRequiredKeyedService<IConnectionMultiplexer>("orleans-redis"));
+
+// Redis Stream provider options (defaults match Fleans engine's FleanStreamingExtensions).
+const string StreamProviderName = "StreamProvider";
+builder.Services.AddOptions<HashRingStreamQueueMapperOptions>(StreamProviderName)
+    .Configure(options => options.TotalQueueCount = 8);
+builder.Services.AddOptions<SimpleQueueCacheOptions>(StreamProviderName);
+builder.Services.AddOptions<RedisStreamReceiverOptions>(StreamProviderName)
+    .Configure(options =>
+    {
+        options.MaxStreamLength = 1000;
+        options.TrimTimeMinutes = 5;
+    });
+
 // ─── Worker-only role gate ────────────────────────────────────────────────────────────
 if (string.IsNullOrEmpty(builder.Configuration["Fleans:Role"]))
     builder.Configuration["Fleans:Role"] = "Worker";
@@ -85,9 +106,10 @@ builder.UseOrleans(siloBuilder =>
         siloBuilder.UseInMemoryReminderService();
     }
 
-    // Memory streaming for the example. For production, swap for Kafka or AzureQueue:
-    //   siloBuilder.AddKafkaStreams("StreamProvider", configuration.GetSection("Fleans:Streaming:Kafka"));
-    siloBuilder.AddMemoryStreams("StreamProvider");
+    // Redis Streams as the stream provider — durable, multi-silo-safe, reuses the same
+    // orleans-redis connection that powers clustering + PubSubStore. Matches the Fleans
+    // engine's default (v0.3.0+). For an in-process single-silo demo, swap for AddMemoryStreams.
+    siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create, null);
 
     // Routes grains carrying [WorkerPlacement] (e.g. CustomTaskHandlerBase subclasses) here.
     siloBuilder.AddPlacementDirector<WorkerPlacementStrategy, WorkerPlacementDirector>();

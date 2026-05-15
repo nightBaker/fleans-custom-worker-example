@@ -29,6 +29,10 @@
     <PackageReference Include="Microsoft.Orleans.Reminders" Version="10.0.1" />
     <PackageReference Include="Microsoft.Orleans.Streaming" Version="10.0.1" />
     <PackageReference Include="Aspire.StackExchange.Redis" Version="13.1.1" />
+    <!-- Redis Streams provider — durable Orleans streaming over the same orleans-redis
+         connection. Matches the engine's default in v0.3.0+. Date-versioned (YYYY.M.D);
+         bump deliberately. MIT licensed, Orleans 10.x compatible. -->
+    <PackageReference Include="Universley.OrleansContrib.StreamsProvider.Redis" Version="2026.4.19" />
   </ItemGroup>
 
   <ItemGroup>
