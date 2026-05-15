@@ -1,5 +1,5 @@
 using Fleans.Plugins.RestCaller;
-using Fleans.Worker.Placement;
+using Fleans.Worker.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
@@ -10,12 +10,16 @@ using Universley.OrleansContrib.StreamsProvider.Redis;
 
 // Worked example: a minimal-viable Fleans plugin worker silo.
 //
-// This host claims grains tagged [WorkerPlacement] (custom-task plugin handlers)
-// and runs them outside the Fleans engine. The dependency closure is intentionally
-// tight — Fleans.Worker (leaf NuGet) + plugin packages + Orleans server + Aspire
-// telemetry — with no transitive reference to Fleans.Application / Fleans.Domain /
-// Fleans.Persistence. That structural guarantee is the whole point of the leaf-
-// package design.
+// This host runs custom-task plugin handlers outside the Fleans engine. Orleans'
+// default placement + GetCompatibleSilos (assembly-loading) automatically routes a
+// plugin grain only to silos that have the concrete handler DLL — so this host
+// runs ONLY the plugins it has compiled in, never the engine's Script/Condition
+// grains, and never other hosts' plugins.
+//
+// The dependency closure is intentionally tight: Fleans.Worker (leaf NuGet) +
+// plugin packages + Orleans server + Aspire telemetry. No transitive reference to
+// Fleans.Application / Fleans.Domain / Fleans.Persistence — that structural
+// guarantee is the whole point of the leaf-package design.
 //
 // To customize: swap the .AddRestCallerPlugin() call below for your own plugins'
 // registration extensions and ship the resulting container image alongside the
@@ -79,23 +83,16 @@ builder.Services.AddOptions<RedisStreamReceiverOptions>(StreamProviderName)
         options.TrimTimeMinutes = 5;
     });
 
-// ─── Worker-only role gate ────────────────────────────────────────────────────────────
-if (string.IsNullOrEmpty(builder.Configuration["Fleans:Role"]))
-    builder.Configuration["Fleans:Role"] = "Worker";
-
-var roleRaw = builder.Configuration["Fleans:Role"]!;
-var role = roleRaw.ToLowerInvariant();
-if (role != "worker" && role != "combined")
-    throw new InvalidOperationException(
-        $"Custom worker host only supports Fleans:Role 'Worker' or 'Combined' (case-insensitive) — got '{roleRaw}'.");
-
-var siloName = $"{role}-{Environment.MachineName}-{Guid.NewGuid():N}".ToLowerInvariant();
 var orleansRedisConnection = builder.Configuration.GetConnectionString("orleans-redis");
 
 // ─── Orleans silo wiring ──────────────────────────────────────────────────────────────
 builder.UseOrleans(siloBuilder =>
 {
-    siloBuilder.Configure<Orleans.Configuration.SiloOptions>(o => o.SiloName = siloName);
+    // Validates Fleans:Role (must be Plugin or Combined; rejects Core/Worker), stamps the
+    // silo name as `plugin-<machine>-<guid>` so the engine's WorkerPlacementDirector
+    // excludes this host from Script/Condition routing, and registers the worker placement
+    // director locally for cluster-wide placement decisions.
+    siloBuilder.AddFleansPluginHost(builder.Configuration);
 
     if (!string.IsNullOrEmpty(orleansRedisConnection))
     {
@@ -110,9 +107,6 @@ builder.UseOrleans(siloBuilder =>
     // orleans-redis connection that powers clustering + PubSubStore. Matches the Fleans
     // engine's default (v0.3.0+). For an in-process single-silo demo, swap for AddMemoryStreams.
     siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create, null);
-
-    // Routes grains carrying [WorkerPlacement] (e.g. CustomTaskHandlerBase subclasses) here.
-    siloBuilder.AddPlacementDirector<WorkerPlacementStrategy, WorkerPlacementDirector>();
 });
 
 // ─── Plugin registration ──────────────────────────────────────────────────────────────

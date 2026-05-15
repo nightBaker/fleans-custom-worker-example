@@ -16,9 +16,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Fleans plugin host surface. Pinned to the version that introduced the leaf-package layout. -->
-    <PackageReference Include="Fleans.Worker" Version="0.2.0" />
-    <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.2.0" />
+    <!-- Fleans plugin host surface. v0.3.0 introduces the 'Plugin' role + AddFleansPluginHost
+         helper that this Program.cs depends on; older versions of Fleans.Worker do not export
+         Fleans.Worker.Hosting.PluginHostExtensions. -->
+    <PackageReference Include="Fleans.Worker" Version="0.3.0" />
+    <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.3.0" />
   </ItemGroup>
 
   <ItemGroup>
