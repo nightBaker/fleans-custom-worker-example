@@ -67,21 +67,34 @@ builder.Services.AddRestCallerPlugin();
 builder.Services.AddMyPlugin(); // <- add this
 ```
 
-### Use Kafka or AzureQueue streaming
+### Streaming providers
 
-The template ships with `AddMemoryStreams` (single-silo demo). For production:
+The template ships with **Redis Streams** as the default — durable, multi-silo-safe, and reuses
+the same `orleans-redis` connection that already powers Orleans clustering and `PubSubStore`.
+This matches the Fleans engine's default (v0.3.0+), wired via the third-party MIT-licensed
+[`Universley.OrleansContrib.StreamsProvider.Redis`](https://github.com/MichaelSL/Universley.OrleansContrib.StreamsProvider.Redis)
+package.
+
+**Production requirement:** the Redis instance must have persistence (AOF or RDB) enabled,
+otherwise a Redis restart loses in-flight stream messages (same caveat operators already have
+for `PubSubStore`).
+
+To swap providers:
 
 ```csharp
-// Kafka
+// In-process Memory (single-silo demo, lossy on restart — debug only)
+siloBuilder.AddMemoryStreams("StreamProvider");
+
+// Kafka (separate cluster)
 siloBuilder.AddKafkaStreams("StreamProvider",
     builder.Configuration.GetSection("Fleans:Streaming:Kafka"));
 
-// Azure Queue
+// Azure Queue Storage (Azurite locally, real Azure in prod)
 siloBuilder.AddAzureQueueStreaming("StreamProvider",
     builder.Configuration.GetSection("Fleans:Streaming:AzureQueue"));
 ```
 
-Add the corresponding `Microsoft.Orleans.Streaming.Kafka` / `Microsoft.Orleans.Streaming.AzureStorage` NuGet to the csproj.
+Add the corresponding `Microsoft.Orleans.Streaming.Kafka` / `Microsoft.Orleans.Streaming.AzureStorage` NuGet to the csproj when swapping.
 
 The Fleans engine **must** be configured with the same stream provider — see [self-hosting docs](https://nightbaker.github.io/fleans/guides/self-host-docker-compose) for the engine-side config.
 
