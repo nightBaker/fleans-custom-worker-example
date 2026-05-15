@@ -6,7 +6,11 @@ Click **Use this template** above to start your own plugin host.
 
 ## What this is
 
-`Fleans.CustomWorkerHost` is a minimum-viable Orleans silo that claims grains tagged `[WorkerPlacement]` (your custom-task plugin handlers) and runs them alongside the Fleans engine. The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + plugin packages + Orleans server + Aspire telemetry. **No reference to `Fleans.Application` / `Fleans.Domain` / `Fleans.Persistence`** — that structural guarantee is the whole point of Fleans' leaf-package design.
+`Fleans.CustomWorkerHost` is a minimum-viable Orleans silo that runs custom-task plugin handlers outside the Fleans engine. The silo tags itself with `Fleans:Role=Plugin` (silo-name prefix `plugin-`) and relies on Orleans' built-in `GetCompatibleSilos` to host **only** the plugin grain classes compiled into its assembly load context — engine-internal grains (Script, Condition) and other hosts' plugins never land here.
+
+The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + plugin packages + Orleans server + Aspire telemetry. **No reference to `Fleans.Application` / `Fleans.Domain` / `Fleans.Persistence`** — that structural guarantee is the whole point of Fleans' leaf-package design.
+
+> **Breaking change (Fleans v0.3.0+).** Earlier versions of this template used `Fleans:Role=Worker`, which made plugin hosts attract engine grains they didn't sign up for. Hosts on Fleans v0.3.0+ must use `Fleans:Role=Plugin` — call `siloBuilder.AddFleansPluginHost(configuration)` and the role default + validation are handled for you.
 
 ## Quick start
 
@@ -16,6 +20,7 @@ gh repo create my-plugin-host --template nightBaker/fleans-custom-worker-example
 cd my-plugin-host
 
 # 2. Run against an Orleans Redis (started by the Fleans Aspire AppHost or your own).
+#    Fleans:Role defaults to "Plugin" via AddFleansPluginHost — no need to set it.
 ConnectionStrings__orleans-redis="localhost:6379" dotnet run --project src/Fleans.CustomWorkerHost
 ```
 
@@ -29,10 +34,10 @@ The host claims any `<serviceTask type="rest-caller">` from BPMN definitions dep
 // src/Fleans.MyPlugin/MyHandler.cs
 using Fleans.Application.Abstractions.Events;
 using Fleans.Worker.CustomTasks;
-using Fleans.Worker.Placement;
 
+// No [WorkerPlacement] — plugin handlers use Orleans default placement, which
+// auto-filters via GetCompatibleSilos to silos that have this DLL loaded.
 [ImplicitStreamSubscription(WorkflowEventStreams.ExecuteCustomTaskStreamNamespace)]
-[WorkerPlacement]
 public sealed class MyHandler : CustomTaskHandlerBase
 {
     public MyHandler(ILogger<MyHandler> logger, IGrainFactory factory) : base(logger, factory) { }
