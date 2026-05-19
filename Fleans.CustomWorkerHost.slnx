@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/Fleans.CustomWorkerHost/Fleans.CustomWorkerHost.csproj" />
+    <Project Path="src/Fleans.Plugins.HelloWorld/Fleans.Plugins.HelloWorld.csproj" />
   </Folder>
 </Solution>

@@ -1,4 +1,4 @@
-using Fleans.Plugins.RestCaller;
+using Fleans.Plugins.HelloWorld;
 using Fleans.Worker.Hosting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenTelemetry;
@@ -111,8 +111,14 @@ builder.UseOrleans(siloBuilder =>
 
 // ─── Plugin registration ──────────────────────────────────────────────────────────────
 // Add or remove .Add*Plugin() calls to pick which BPMN <serviceTask type="..."> values
-// this host claims. Each plugin is a separate NuGet package that the host references.
-builder.Services.AddRestCallerPlugin();
+// this host claims. Each plugin is either a separate NuGet package or — as here — a
+// project authored in this repo and ProjectReference'd from the host csproj.
+//
+// HelloWorld is the worked-example plugin shipped in this template (see
+// ../Fleans.Plugins.HelloWorld/). To swap in the pre-built REST caller plugin, add
+// `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />` to the
+// host csproj and replace this line with `builder.Services.AddRestCallerPlugin();`.
+builder.Services.AddHelloWorldPlugin();
 // builder.Services.AddYourCustomPlugin();
 
 // ─── App ──────────────────────────────────────────────────────────────────────────────
