@@ -172,36 +172,153 @@ builder.Services.AddHelloWorldPlugin();
 builder.Services.AddMyTaskPlugin(); // <- add this
 ```
 
-### Streaming providers
+### Choosing providers (storage + streaming)
 
-The template ships with **Redis Streams** as the default — durable, multi-silo-safe, and reuses
-the same `orleans-redis` connection that already powers Orleans clustering and `PubSubStore`.
-This matches the Fleans engine's default (v0.3.0+, unchanged in v0.4.0), wired via the third-party MIT-licensed
-[`Universley.OrleansContrib.StreamsProvider.Redis`](https://github.com/MichaelSL/Universley.OrleansContrib.StreamsProvider.Redis)
-package.
+A plugin host needs three Orleans pieces wired before it can join the engine's cluster: a **clustering** backend (membership table), a **`PubSubStore`** grain storage (so stream consumers can find producers' subscriptions), and a **stream provider** (the actual transport for custom-task events). Plus optionally a **reminder service** if your plugin uses Orleans reminders.
 
-**Production requirement:** the Redis instance must have persistence (AOF or RDB) enabled,
-otherwise a Redis restart loses in-flight stream messages (same caveat operators already have
-for `PubSubStore`).
+The default template wires all four to Redis — durable, single shared connection, matches the engine v0.4.0 default. You don't have to use Redis everywhere, but two of the four pieces are tied to the engine's choice:
 
-To swap providers:
+| Piece | Engine-host coupling | Why |
+|---|---|---|
+| **Clustering** (`UseRedisClustering` / equivalent) | Must **share the cluster** (same `ClusterId` + `ServiceId` + same MembershipTable backend), but can be any Orleans-supported backend | Plugin host needs to join the engine's gossip ring |
+| **`PubSubStore`** grain storage | **MUST match the engine's choice and storage name** (`PubSubStore`) | Consumers (plugin host) find producers' (engine) subscription registrations through this store. Cross-backend stores can't see each other. |
+| **Stream provider** (name + backend) | **MUST match the engine** (provider name = `StreamProvider`, same backend) | Producer and consumer have to be on the same transport |
+| **Reminder service** | Independent | Only matters for plugins that schedule their own reminders. In-memory is fine for stateless plugins. |
+
+The Fleans engine reads its provider choices from configuration (`Fleans:Streaming:Provider`, `Persistence:Provider`, etc.). To match it, set the **same values** in your plugin host's environment when both run against the same release artifacts. The Helm chart's `streaming.provider` / `persistence.provider` knobs (Fleans v0.4.0+) drive the engine; this template's `Program.cs` wires the host to match.
+
+#### Default: Redis everywhere (recommended)
+
+What the template ships:
 
 ```csharp
-// In-process Memory (single-silo demo, lossy on restart — debug only)
-siloBuilder.AddMemoryStreams("StreamProvider");
+// Clustering (Orleans membership table)
+siloBuilder.UseRedisClustering(orleansRedisConnection);
 
-// Kafka (separate cluster)
-siloBuilder.AddKafkaStreams("StreamProvider",
-    builder.Configuration.GetSection("Fleans:Streaming:Kafka"));
+// PubSubStore grain storage — the storage NAME ("PubSubStore") MUST be exactly this
+siloBuilder.AddRedisGrainStorage("PubSubStore",
+    options => options.ConfigurationOptions = ConfigurationOptions.Parse(orleansRedisConnection));
 
-// Azure Queue Storage (Azurite locally, real Azure in prod)
-siloBuilder.AddAzureQueueStreaming("StreamProvider",
-    builder.Configuration.GetSection("Fleans:Streaming:AzureQueue"));
+// Reminder service — in-memory; swap if your plugins use Orleans reminders
+siloBuilder.UseInMemoryReminderService();
+
+// Stream provider — name "StreamProvider" MUST match the engine's wiring
+siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create, null);
 ```
 
-Add the corresponding `Microsoft.Orleans.Streaming.Kafka` / `Microsoft.Orleans.Streaming.AzureStorage` NuGet to the csproj when swapping.
+**Production requirement:** Redis must have persistence (AOF or RDB) enabled. Without it, a Redis restart loses in-flight stream messages AND every silo's PubSubStore subscription registry — the same caveat operators already have for the engine.
 
-The Fleans engine **must** be configured with the same stream provider — see [self-hosting docs](https://nightbaker.github.io/fleans/guides/self-host-docker-compose) for the engine-side config.
+#### Storage alternatives (clustering + PubSubStore + reminders)
+
+##### Postgres / SQL Server (ADO.NET)
+
+Add the NuGets and swap the calls. The engine MUST also be on the same SQL-backed PubSubStore (Fleans persistence is independent from this — `Persistence:Provider` controls workflow-state Postgres; the Orleans PubSubStore is a separate concern):
+
+```xml
+<PackageReference Include="Microsoft.Orleans.Clustering.AdoNet" Version="10.0.1" />
+<PackageReference Include="Microsoft.Orleans.Persistence.AdoNet" Version="10.0.1" />
+<PackageReference Include="Microsoft.Orleans.Reminders.AdoNet" Version="10.0.1" />
+<PackageReference Include="Npgsql" Version="9.0.3" />
+```
+
+```csharp
+var adoConn = builder.Configuration.GetConnectionString("orleans");
+siloBuilder.UseAdoNetClustering(opts => { opts.Invariant = "Npgsql"; opts.ConnectionString = adoConn; });
+siloBuilder.AddAdoNetGrainStorage("PubSubStore", opts =>
+{
+    opts.Invariant = "Npgsql";
+    opts.ConnectionString = adoConn;
+});
+siloBuilder.UseAdoNetReminderService(opts => { opts.Invariant = "Npgsql"; opts.ConnectionString = adoConn; });
+```
+
+Operators must apply the [Orleans AdoNet schema scripts](https://learn.microsoft.com/dotnet/orleans/host/configuration-guide/adonet-configuration) to the database before first start.
+
+##### Azure Storage Tables
+
+```xml
+<PackageReference Include="Microsoft.Orleans.Clustering.AzureStorage" Version="10.0.1" />
+<PackageReference Include="Microsoft.Orleans.Persistence.AzureStorage" Version="10.0.1" />
+<PackageReference Include="Microsoft.Orleans.Reminders.AzureStorage" Version="10.0.1" />
+```
+
+```csharp
+var azureConn = builder.Configuration.GetConnectionString("orleans-azure-tables");
+siloBuilder.UseAzureStorageClustering(opts => opts.ConfigureTableServiceClient(azureConn));
+siloBuilder.AddAzureTableGrainStorage("PubSubStore", opts =>
+    opts.ConfigureTableServiceClient(azureConn));
+siloBuilder.UseAzureTableReminderService(opts => opts.ConfigureTableServiceClient(azureConn));
+```
+
+##### Mix-and-match
+
+It's fine — and sometimes desirable — to mix backends. The most common pattern is **Redis clustering + Redis PubSubStore + Redis streams + in-memory reminders**: minimum infrastructure, matches the engine default. Another reasonable pattern is **AdoNet clustering + AdoNet PubSubStore** (when operators already run Postgres and want one fewer dependency) — but then the engine must also use AdoNet for the same pieces.
+
+#### Streaming alternatives
+
+The provider **name** must match the engine's (`StreamProvider`). The **backend** must match — both producer and consumer transit messages over the same physical broker.
+
+##### Memory (single-silo debug only — DO NOT use in multi-host)
+
+```csharp
+siloBuilder.AddMemoryStreams("StreamProvider");
+```
+
+Messages don't leave the process. Both the engine and the plugin host would have to be a single combined silo for this to work end-to-end — which defeats the point of running an external plugin host. Useful only for local in-process plugin-development before you put a real broker in.
+
+##### Kafka
+
+```xml
+<PackageReference Include="Microsoft.Orleans.Streaming.Kafka" Version="10.0.1" />
+```
+
+```csharp
+siloBuilder.AddKafkaStreams("StreamProvider", b =>
+{
+    b.ConfigureKafka(builder.Configuration.GetSection("Fleans:Streaming:Kafka"));
+});
+```
+
+Configuration (env vars):
+
+```
+Fleans__Streaming__Kafka__Brokers=kafka.kafka.svc:9092
+Fleans__Streaming__Kafka__ConsumerGroup=fleans
+Fleans__Streaming__Kafka__TopicPrefix=fleans-
+```
+
+The defaults match the engine: consumer group `fleans`, topics `fleans-0` through `fleans-7` (8 topics, one per Orleans stream queue). The engine must be configured with the **same** broker list, consumer group, and topic prefix.
+
+##### Azure Queue Storage (Azurite locally / Storage Queue in production)
+
+```xml
+<PackageReference Include="Microsoft.Orleans.Streaming.AzureStorage" Version="10.0.1" />
+```
+
+```csharp
+siloBuilder.AddAzureQueueStreams("StreamProvider", b =>
+{
+    b.ConfigureAzureQueue(opts =>
+    {
+        opts.Configure<IConfiguration>((o, cfg) =>
+        {
+            o.ConfigureQueueServiceClient(cfg["Fleans:Streaming:AzureQueue:ConnectionString"]);
+            o.QueueNames = [
+                "fleans-stream-0", "fleans-stream-1", "fleans-stream-2", "fleans-stream-3",
+                "fleans-stream-4", "fleans-stream-5", "fleans-stream-6", "fleans-stream-7"
+            ];
+        });
+    });
+});
+```
+
+The engine uses queue names `fleans-stream-0` through `fleans-stream-7`. The plugin host's `QueueNames` list MUST be exactly the same (same length, same names) — Orleans hashes Stream IDs across the list, and any mismatch results in producers writing to queues the consumer doesn't poll.
+
+#### Cross-references
+
+- The Fleans engine's `Fleans.ServiceDefaults/FleanStreamingExtensions.cs` is the canonical implementation of the streaming-provider switch — read it if you need to match an engine deployment exactly.
+- The engine-side configuration knobs (`Fleans:Streaming:Provider`, `Fleans:Streaming:Kafka:Brokers`, etc.) are documented at [Fleans / Configuration](https://nightbaker.github.io/fleans/reference/configuration/) and [Fleans / Streaming](https://nightbaker.github.io/fleans/reference/streaming/).
+- The Helm chart's `streaming.provider` / `persistence.provider` / `postgres.enabled` knobs drive the engine in production; mirror their effective values in this host's environment.
 
 ## Verifying the leaf-package promise
 
