@@ -11,6 +11,10 @@ Click **Use this template** above to start your own plugin host.
 The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + plugin packages + Orleans server + Aspire telemetry. **No reference to `Fleans.Application` / `Fleans.Domain` / `Fleans.Persistence`** — that structural guarantee is the whole point of Fleans' leaf-package design.
 
 > **Breaking change (Fleans v0.3.0+).** Earlier versions of this template used `Fleans:Role=Worker`, which made plugin hosts attract engine grains they didn't sign up for. Hosts on Fleans v0.3.0+ must use `Fleans:Role=Plugin` — call `siloBuilder.AddFleansPluginHost(configuration)` and the role default + validation are handled for you.
+>
+> **Breaking change (Fleans v0.4.0+).** Plugin handlers must declare `[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.<taskType>")]` as a **literal string** with the task-type baked in — not `[ImplicitStreamSubscription(WorkflowEventStreams.ExecuteCustomTaskStreamNamespace)]`. v0.4.0's per-task-type stream sharding (#566) routes events to `events.ExecuteCustomTaskEvent.<taskType>`; a handler subscribed to the bare namespace receives no events, and `AddCustomTaskPlugin<T>` throws `InvalidOperationException` at silo startup if the attribute literal doesn't match the registered task-type. See the updated example below.
+>
+> v0.4.0 also routes `OperationCanceledException` from the supplied grain-lifetime `CancellationToken` as a redelivery hint (NOT a failure) — plugin authors should `await` against the token (`HttpClient.SendAsync(req, ct)`, `Task.Delay(timeout, ct)`, …) so the grain can deactivate cleanly during silo shutdown. The example below shows the pattern.
 
 ## Quick start
 
@@ -32,12 +36,19 @@ The host claims any `<serviceTask type="rest-caller">` from BPMN definitions dep
 
 ```csharp
 // src/Fleans.MyPlugin/MyHandler.cs
-using Fleans.Application.Abstractions.Events;
 using Fleans.Worker.CustomTasks;
 
 // No [WorkerPlacement] — plugin handlers use Orleans default placement, which
 // auto-filters via GetCompatibleSilos to silos that have this DLL loaded.
-[ImplicitStreamSubscription(WorkflowEventStreams.ExecuteCustomTaskStreamNamespace)]
+//
+// The [ImplicitStreamSubscription] literal MUST equal
+// $"events.ExecuteCustomTaskEvent.{TaskType}" — the per-task-type stream namespace
+// the Fleans v0.4.0 publisher fires on (#566). Attribute arguments must be
+// compile-time constants, so each plugin hard-codes its own literal — keep the
+// task-type segment here in sync with the TaskType property below AND with the
+// taskType passed to AddCustomTaskPlugin<T>(...). AddCustomTaskPlugin validates
+// all three at silo startup and throws on drift.
+[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.my-task")]
 public sealed class MyHandler : CustomTaskHandlerBase
 {
     public MyHandler(ILogger<MyHandler> logger, IGrainFactory factory) : base(logger, factory) { }
@@ -50,7 +61,11 @@ public sealed class MyHandler : CustomTaskHandlerBase
         CustomTaskExecutionContext context,
         CancellationToken cancellationToken)
     {
-        // your work
+        // Honor the grain-lifetime CancellationToken — v0.4.0 (#568) treats an OCE
+        // thrown by the supplied token as a redelivery hint, NOT a task failure.
+        // Pass `cancellationToken` to every awaitable that takes one.
+        await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
+
         return new Dictionary<string, object?>
         {
             ["__response"] = new { ok = true }
@@ -76,7 +91,7 @@ builder.Services.AddMyPlugin(); // <- add this
 
 The template ships with **Redis Streams** as the default — durable, multi-silo-safe, and reuses
 the same `orleans-redis` connection that already powers Orleans clustering and `PubSubStore`.
-This matches the Fleans engine's default (v0.3.0+), wired via the third-party MIT-licensed
+This matches the Fleans engine's default (v0.3.0+, unchanged in v0.4.0), wired via the third-party MIT-licensed
 [`Universley.OrleansContrib.StreamsProvider.Redis`](https://github.com/MichaelSL/Universley.OrleansContrib.StreamsProvider.Redis)
 package.
 
