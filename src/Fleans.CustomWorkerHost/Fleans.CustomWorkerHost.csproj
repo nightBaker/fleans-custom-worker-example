@@ -28,7 +28,17 @@
          `await` against the token (e.g. `await Task.Delay(timeout, ct)`) so the grain
          can deactivate cleanly during silo shutdown. -->
     <PackageReference Include="Fleans.Worker" Version="0.4.0" />
-    <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Worked-example plugin authored in this repo (see ../Fleans.Plugins.HelloWorld/).
+         Real templates would either ProjectReference their own plugin(s) here OR
+         PackageReference the published NuGet packages of plugins they want to host.
+         The pre-built Fleans.Plugins.RestCaller plugin is one such package — to host
+         it alongside (or instead of) HelloWorld, add:
+           <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />
+         then call .AddRestCallerPlugin() in Program.cs. -->
+    <ProjectReference Include="..\Fleans.Plugins.HelloWorld\Fleans.Plugins.HelloWorld.csproj" />
   </ItemGroup>
 
   <ItemGroup>

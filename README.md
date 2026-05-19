@@ -16,6 +16,17 @@ The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + pl
 >
 > v0.4.0 also routes `OperationCanceledException` from the supplied grain-lifetime `CancellationToken` as a redelivery hint (NOT a failure) — plugin authors should `await` against the token (`HttpClient.SendAsync(req, ct)`, `Task.Delay(timeout, ct)`, …) so the grain can deactivate cleanly during silo shutdown. The example below shows the pattern.
 
+> ## ⚠️ Known engine-side blockers on Fleans v0.4.0
+>
+> When an external plugin host runs a plugin that is **not** also bundled in the engine images (`fleans-api` / `fleans-worker`), two engine-side gaps block end-to-end completion. The HelloWorld plugin in this template is exactly that shape — handler activates correctly on the plugin host, but the workflow doesn't complete until both engine fixes ship.
+>
+> - **[nightBaker/fleans#627](https://github.com/nightBaker/fleans/issues/627)** — `AddFleansPluginHost` only registers `WorkerPlacementStrategy`; needs `CorePlacementStrategy` too so the plugin host can target `[CorePlacement]` grains (specifically `CustomTaskCatalogGrain` for plugin registration). Symptom: `Catalog Register failed ... Could not resolve placement strategy CorePlacementStrategy for grain type customtaskcatalog`.
+> - **[nightBaker/fleans#628](https://github.com/nightBaker/fleans/issues/628)** — `ExpandoObjectSurrogateConverter` lives in `Fleans.Domain` (engine-only), but the plugin host needs it to serialize the `ExpandoObject variables` argument of `IWorkflowInstanceCallback`. Symptom: `CodecNotFoundException: Could not find a copier for type System.Dynamic.ExpandoObject` on the response callback. Fix: move the surrogate to `Fleans.Domain.Abstractions` (in every plugin host's closure).
+>
+> Both issues are hidden by the canonical `Fleans.Plugins.RestCaller` smoke (the engine workers also bundle that plugin, so Orleans routes activations there). They surface immediately the moment an operator authors a plugin that's only on the external host.
+>
+> Until v0.4.1 ships these fixes, the workaround is to register the same plugin's NuGet package on the engine `fleans-worker` image as well — defeats the isolation intent of the template, but unblocks end-to-end.
+
 ## Quick start
 
 ```bash
@@ -28,15 +39,25 @@ cd my-plugin-host
 ConnectionStrings__orleans-redis="localhost:6379" dotnet run --project src/Fleans.CustomWorkerHost
 ```
 
-The host claims any `<serviceTask type="rest-caller">` from BPMN definitions deployed on the engine. Trigger a workflow that uses it, and the call executes here, not on the engine silos.
+The host ships with one worked-example plugin — `Fleans.Plugins.HelloWorld` (see [`src/Fleans.Plugins.HelloWorld/`](src/Fleans.Plugins.HelloWorld)) — which claims `<serviceTask type="hello-world">` and returns `__response.message = "Hello, {name}!"`. Deploy a BPMN that uses it on the engine, trigger a workflow, and the call executes here, not on the engine silos.
 
-## Customizing
+To host the pre-built REST-call plugin (`Fleans.Plugins.RestCaller`, ships with the Fleans engine) instead of (or alongside) Hello World, add `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />` to `Fleans.CustomWorkerHost.csproj` and call `builder.Services.AddRestCallerPlugin();` in `Program.cs`.
 
-### Add your own plugin
+## The Hello World plugin (the worked example)
+
+The template ships with the smallest-possible plugin so the structure is obvious. Three files in `src/Fleans.Plugins.HelloWorld/`:
+
+- **`HelloWorldHandler.cs`** — the handler grain. Reads `name` from inputs, returns `__response.message`.
+- **`HelloWorldSchema.cs`** — the parameter schema the Fleans editor renders when an author selects this task type.
+- **`HelloWorldServiceCollectionExtensions.cs`** — the DI extension `AddHelloWorldPlugin()` the host calls.
+
+The handler in full:
 
 ```csharp
-// src/Fleans.MyPlugin/MyHandler.cs
+// src/Fleans.Plugins.HelloWorld/HelloWorldHandler.cs
+using System.Dynamic;
 using Fleans.Worker.CustomTasks;
+using Microsoft.Extensions.Logging;
 
 // No [WorkerPlacement] — plugin handlers use Orleans default placement, which
 // auto-filters via GetCompatibleSilos to silos that have this DLL loaded.
@@ -48,43 +69,107 @@ using Fleans.Worker.CustomTasks;
 // task-type segment here in sync with the TaskType property below AND with the
 // taskType passed to AddCustomTaskPlugin<T>(...). AddCustomTaskPlugin validates
 // all three at silo startup and throws on drift.
-[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.my-task")]
-public sealed class MyHandler : CustomTaskHandlerBase
+[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.hello-world")]
+public sealed class HelloWorldHandler : CustomTaskHandlerBase
 {
-    public MyHandler(ILogger<MyHandler> logger, IGrainFactory factory) : base(logger, factory) { }
+    public const string HelloWorldTaskType = "hello-world";
 
-    protected override string TaskType => "my-task";
+    private readonly ILogger<HelloWorldHandler> _logger;
 
-    protected override async Task<IDictionary<string, object?>> ExecuteAsync(
+    public HelloWorldHandler(ILogger<HelloWorldHandler> logger, IGrainFactory grainFactory)
+        : base(logger, grainFactory) { _logger = logger; }
+
+    protected override string TaskType => HelloWorldTaskType;
+
+    protected override Task<IDictionary<string, object?>> ExecuteAsync(
         IDictionary<string, object?> resolvedInputs,
         ExpandoObject variables,
         CustomTaskExecutionContext context,
         CancellationToken cancellationToken)
     {
-        // Honor the grain-lifetime CancellationToken — v0.4.0 (#568) treats an OCE
-        // thrown by the supplied token as a redelivery hint, NOT a task failure.
-        // Pass `cancellationToken` to every awaitable that takes one.
-        await Task.Delay(TimeSpan.FromMilliseconds(50), cancellationToken);
+        // Honor the supplied CancellationToken — v0.4.0 (#568) treats an OCE from
+        // this token as a redelivery hint, NOT a task failure. For real plugins
+        // that do I/O, pass cancellationToken to every awaitable.
+        cancellationToken.ThrowIfCancellationRequested();
 
-        return new Dictionary<string, object?>
+        var name = (resolvedInputs.TryGetValue("name", out var raw) ? raw?.ToString() : null) ?? "world";
+        var message = $"Hello, {name}!";
+
+        IDictionary<string, object?> result = new Dictionary<string, object?>
         {
-            ["__response"] = new { ok = true }
+            ["__response"] = new Dictionary<string, object?> { ["message"] = message }
         };
+        return Task.FromResult(result);
     }
 }
-
-public static class MyPluginRegistration
-{
-    public static IServiceCollection AddMyPlugin(this IServiceCollection services) =>
-        services.AddCustomTaskPlugin<MyHandler>(taskType: "my-task", displayName: "My Task");
-}
 ```
+
+The DI registration:
+
+```csharp
+// src/Fleans.Plugins.HelloWorld/HelloWorldServiceCollectionExtensions.cs
+public static IServiceCollection AddHelloWorldPlugin(this IServiceCollection services) =>
+    services.AddCustomTaskPlugin<HelloWorldHandler>(
+        taskType: HelloWorldHandler.HelloWorldTaskType,
+        displayName: "Hello World",
+        parameterSchema: HelloWorldSchema.Default);
+```
+
+The Program.cs wiring is one line:
+
+```csharp
+builder.Services.AddHelloWorldPlugin();
+```
+
+### Try it end-to-end
+
+Deploy this BPMN on the Fleans engine:
+
+```xml
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:fleans="https://fleans.io/schema/bpmn/1.0">
+  <bpmn:process id="hello-smoke" isExecutable="true">
+    <bpmn:startEvent id="start" />
+    <bpmn:serviceTask id="greet">
+      <bpmn:extensionElements>
+        <fleans:taskDefinition type="hello-world" />
+        <fleans:ioMapping>
+          <fleans:input  source="Alice"            target="name" />
+          <fleans:output source="=__response.message" target="greeting" />
+        </fleans:ioMapping>
+      </bpmn:extensionElements>
+    </bpmn:serviceTask>
+    <bpmn:endEvent id="end" />
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="greet" />
+    <bpmn:sequenceFlow id="f2" sourceRef="greet" targetRef="end" />
+  </bpmn:process>
+</bpmn:definitions>
+```
+
+Start an instance via `POST /Execution/start {"WorkflowId":"hello-smoke"}` and inspect the result — `greeting` will be `"Hello, Alice!"`, executed on this plugin host (EventId 4035 `Custom-task handler activated` lands in the plugin-host logs, not the engine's).
+
+## Customizing
+
+### Add your own plugin
+
+Use the Hello World project as a template:
+
+```bash
+cp -r src/Fleans.Plugins.HelloWorld src/Fleans.Plugins.MyTask
+# rename namespaces + handler class + task-type literal in the 3 files
+```
+
+The three things that MUST stay in lock-step (v0.4.0 startup validation enforces this):
+
+1. **`[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.<taskType>")]` literal** on the handler.
+2. **`TaskType` property** returning the same string.
+3. **`taskType:` argument** to `AddCustomTaskPlugin<T>(...)`.
 
 Then in `Program.cs`:
 
 ```csharp
-builder.Services.AddRestCallerPlugin();
-builder.Services.AddMyPlugin(); // <- add this
+builder.Services.AddHelloWorldPlugin();
+builder.Services.AddMyTaskPlugin(); // <- add this
 ```
 
 ### Streaming providers
@@ -124,7 +209,7 @@ The Fleans engine **must** be configured with the same stream provider — see [
 dotnet list package --include-transitive --project src/Fleans.CustomWorkerHost | grep -i fleans
 ```
 
-You should see only `Fleans.Application.Abstractions`, `Fleans.Domain.Abstractions`, `Fleans.Worker`, and your plugin packages. **No `Fleans.Application` or `Fleans.Domain`** — those stay engine-internal.
+You should see only `Fleans.Application.Abstractions`, `Fleans.Domain.Abstractions`, `Fleans.Worker`, and your plugin packages or in-repo plugin projects (this template's `Fleans.Plugins.HelloWorld`). **No `Fleans.Application` or `Fleans.Domain`** — those stay engine-internal.
 
 ## License
 
