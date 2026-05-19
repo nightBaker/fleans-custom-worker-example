@@ -16,11 +16,19 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Fleans plugin host surface. v0.3.0 introduces the 'Plugin' role + AddFleansPluginHost
-         helper that this Program.cs depends on; older versions of Fleans.Worker do not export
-         Fleans.Worker.Hosting.PluginHostExtensions. -->
-    <PackageReference Include="Fleans.Worker" Version="0.3.0" />
-    <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.3.0" />
+    <!-- Fleans plugin host surface.
+         v0.3.0 introduced the 'Plugin' role + AddFleansPluginHost helper that this
+         Program.cs depends on.
+         v0.4.0 introduced per-task-type stream namespaces (#566) — plugin handlers MUST
+         declare [ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.<taskType>")]
+         as a literal string (see README "Add your own plugin" for the v0.4.0 shape).
+         AddCustomTaskPlugin validates the literal at silo startup and throws on drift.
+         v0.4.0 also routes OperationCanceledException from the supplied grain-lifetime
+         CancellationToken as a redelivery hint (NOT a failure) — plugin authors should
+         `await` against the token (e.g. `await Task.Delay(timeout, ct)`) so the grain
+         can deactivate cleanly during silo shutdown. -->
+    <PackageReference Include="Fleans.Worker" Version="0.4.0" />
+    <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />
   </ItemGroup>
 
   <ItemGroup>
