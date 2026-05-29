@@ -94,6 +94,16 @@ builder.UseOrleans(siloBuilder =>
     // director locally for cluster-wide placement decisions.
     siloBuilder.AddFleansPluginHost(builder.Configuration);
 
+    // Workaround for nightBaker/fleans#703 on Fleans v0.5.0 and earlier: plugin host silos
+    // must NOT advertise as Orleans client gateways. Without this override, Fleans.Web's
+    // Orleans client round-robins among advertised gateways and intermittently picks this
+    // plugin silo as its gateway. The plugin silo's assembly load context lacks
+    // Fleans.Application, so calls to engine grains (IWorkflowInstanceGrain, ...)
+    // forwarded through it throw "Unable to load type Fleans.Application.Grains.IWorkflowInstanceGrain".
+    // Engine-side fix in AddFleansPluginHost lands in the Fleans release after v0.5.0;
+    // delete this Configure block once you upgrade past it.
+    siloBuilder.Configure<Orleans.Configuration.EndpointOptions>(o => o.GatewayPort = 0);
+
     if (!string.IsNullOrEmpty(orleansRedisConnection))
     {
         siloBuilder.UseRedisClustering(orleansRedisConnection);

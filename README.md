@@ -18,6 +18,8 @@ The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + pl
 >
 > **Fleans v0.5.0+ enforcement.** `PlacementRoleAssertion` ([nightBaker/fleans#457](https://github.com/nightBaker/fleans/issues/457)) now fails fast at silo startup if `Fleans:Role` config and the grain placement attribute disagree. `AddFleansPluginHost` sets `Fleans:Role=Plugin` for you, so existing configurations continue to work — but if you wire role configuration manually, the silo throws at startup instead of silently misrouting grains.
 
+> **Workaround for Fleans v0.5.0 and earlier ([nightBaker/fleans#703](https://github.com/nightBaker/fleans/issues/703)).** This template explicitly sets `EndpointOptions.GatewayPort = 0` in `Program.cs` right after `AddFleansPluginHost`. Without this, plugin host silos advertise themselves as Orleans client gateways. Fleans.Web is an Orleans client (`UseOrleansClient`) and round-robins among advertised gateways; when it picks this plugin silo and forwards an engine grain call through it, the gateway throws `Unable to load Fleans.Application.Grains.IWorkflowInstanceGrain, Fleans.Application` because the plugin host's assembly load context lacks `Fleans.Application` by design. The engine-side fix in `AddFleansPluginHost` lands in the Fleans release after v0.5.0 — delete the `Configure<EndpointOptions>` block in `Program.cs` once you upgrade past it.
+
 ## Quick start
 
 ```bash
