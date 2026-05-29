@@ -116,7 +116,7 @@ builder.UseOrleans(siloBuilder =>
 //
 // HelloWorld is the worked-example plugin shipped in this template (see
 // ../Fleans.Plugins.HelloWorld/). To swap in the pre-built REST caller plugin, add
-// `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />` to the
+// `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.5.0" />` to the
 // host csproj and replace this line with `builder.Services.AddRestCallerPlugin();`.
 builder.Services.AddHelloWorldPlugin();
 // builder.Services.AddYourCustomPlugin();

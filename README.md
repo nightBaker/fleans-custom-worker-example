@@ -15,17 +15,8 @@ The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + pl
 > **Breaking change (Fleans v0.4.0+).** Plugin handlers must declare `[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.<taskType>")]` as a **literal string** with the task-type baked in — not `[ImplicitStreamSubscription(WorkflowEventStreams.ExecuteCustomTaskStreamNamespace)]`. v0.4.0's per-task-type stream sharding (#566) routes events to `events.ExecuteCustomTaskEvent.<taskType>`; a handler subscribed to the bare namespace receives no events, and `AddCustomTaskPlugin<T>` throws `InvalidOperationException` at silo startup if the attribute literal doesn't match the registered task-type. See the updated example below.
 >
 > v0.4.0 also routes `OperationCanceledException` from the supplied grain-lifetime `CancellationToken` as a redelivery hint (NOT a failure) — plugin authors should `await` against the token (`HttpClient.SendAsync(req, ct)`, `Task.Delay(timeout, ct)`, …) so the grain can deactivate cleanly during silo shutdown. The example below shows the pattern.
-
-> ## ⚠️ Known engine-side blockers on Fleans v0.4.0
 >
-> When an external plugin host runs a plugin that is **not** also bundled in the engine images (`fleans-api` / `fleans-worker`), two engine-side gaps block end-to-end completion. The HelloWorld plugin in this template is exactly that shape — handler activates correctly on the plugin host, but the workflow doesn't complete until both engine fixes ship.
->
-> - **[nightBaker/fleans#627](https://github.com/nightBaker/fleans/issues/627)** — `AddFleansPluginHost` only registers `WorkerPlacementStrategy`; needs `CorePlacementStrategy` too so the plugin host can target `[CorePlacement]` grains (specifically `CustomTaskCatalogGrain` for plugin registration). Symptom: `Catalog Register failed ... Could not resolve placement strategy CorePlacementStrategy for grain type customtaskcatalog`.
-> - **[nightBaker/fleans#628](https://github.com/nightBaker/fleans/issues/628)** — `ExpandoObjectSurrogateConverter` lives in `Fleans.Domain` (engine-only), but the plugin host needs it to serialize the `ExpandoObject variables` argument of `IWorkflowInstanceCallback`. Symptom: `CodecNotFoundException: Could not find a copier for type System.Dynamic.ExpandoObject` on the response callback. Fix: move the surrogate to `Fleans.Domain.Abstractions` (in every plugin host's closure).
->
-> Both issues are hidden by the canonical `Fleans.Plugins.RestCaller` smoke (the engine workers also bundle that plugin, so Orleans routes activations there). They surface immediately the moment an operator authors a plugin that's only on the external host.
->
-> Until v0.4.1 ships these fixes, the workaround is to register the same plugin's NuGet package on the engine `fleans-worker` image as well — defeats the isolation intent of the template, but unblocks end-to-end.
+> **Fleans v0.5.0+ enforcement.** `PlacementRoleAssertion` ([nightBaker/fleans#457](https://github.com/nightBaker/fleans/issues/457)) now fails fast at silo startup if `Fleans:Role` config and the grain placement attribute disagree. `AddFleansPluginHost` sets `Fleans:Role=Plugin` for you, so existing configurations continue to work — but if you wire role configuration manually, the silo throws at startup instead of silently misrouting grains.
 
 ## Quick start
 
@@ -41,7 +32,7 @@ ConnectionStrings__orleans-redis="localhost:6379" dotnet run --project src/Flean
 
 The host ships with one worked-example plugin — `Fleans.Plugins.HelloWorld` (see [`src/Fleans.Plugins.HelloWorld/`](src/Fleans.Plugins.HelloWorld)) — which claims `<serviceTask type="hello-world">` and returns `__response.message = "Hello, {name}!"`. Deploy a BPMN that uses it on the engine, trigger a workflow, and the call executes here, not on the engine silos.
 
-To host the pre-built REST-call plugin (`Fleans.Plugins.RestCaller`, ships with the Fleans engine) instead of (or alongside) Hello World, add `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />` to `Fleans.CustomWorkerHost.csproj` and call `builder.Services.AddRestCallerPlugin();` in `Program.cs`.
+To host the pre-built REST-call plugin (`Fleans.Plugins.RestCaller`, ships with the Fleans engine) instead of (or alongside) Hello World, add `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.5.0" />` to `Fleans.CustomWorkerHost.csproj` and call `builder.Services.AddRestCallerPlugin();` in `Program.cs`.
 
 ## The Hello World plugin (the worked example)
 
