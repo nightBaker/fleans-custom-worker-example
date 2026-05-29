@@ -26,8 +26,14 @@
          v0.4.0 also routes OperationCanceledException from the supplied grain-lifetime
          CancellationToken as a redelivery hint (NOT a failure) — plugin authors should
          `await` against the token (e.g. `await Task.Delay(timeout, ct)`) so the grain
-         can deactivate cleanly during silo shutdown. -->
-    <PackageReference Include="Fleans.Worker" Version="0.4.0" />
+         can deactivate cleanly during silo shutdown.
+         v0.5.0 added PlacementRoleAssertion (#457) — silo startup throws if Fleans:Role
+         and grain placement attributes disagree. AddFleansPluginHost sets Plugin role
+         for you, so existing configs continue to work; manual role wiring now fails fast
+         instead of silently misrouting grains. v0.5.0 also defines the Fleans Meter and
+         ActivitySource publicly (#462) — plugins can attach spans/metrics to
+         FleansDiagnostics.ActivitySource without project-referencing the engine. -->
+    <PackageReference Include="Fleans.Worker" Version="0.5.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -36,7 +42,7 @@
          PackageReference the published NuGet packages of plugins they want to host.
          The pre-built Fleans.Plugins.RestCaller plugin is one such package — to host
          it alongside (or instead of) HelloWorld, add:
-           <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.4.0" />
+           <PackageReference Include="Fleans.Plugins.RestCaller" Version="0.5.0" />
          then call .AddRestCallerPlugin() in Program.cs. -->
     <ProjectReference Include="..\Fleans.Plugins.HelloWorld\Fleans.Plugins.HelloWorld.csproj" />
   </ItemGroup>
