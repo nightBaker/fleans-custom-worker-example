@@ -5,6 +5,7 @@ using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using Orleans.Configuration;
+using Orleans.Streams;
 using StackExchange.Redis;
 using Universley.OrleansContrib.StreamsProvider.Redis;
 
@@ -66,8 +67,8 @@ builder.Services.AddHealthChecks()
 builder.AddKeyedRedisClient("orleans-redis");
 
 // The Universley Redis Streams provider resolves a non-keyed IConnectionMultiplexer from DI.
-// Alias the Aspire-registered keyed one so the same connection pool serves clustering,
-// PubSubStore, and the stream provider — no second socket.
+// Alias the Aspire-registered keyed one so the same connection pool serves clustering
+// and the stream provider — no second socket.
 builder.Services.TryAddSingleton<IConnectionMultiplexer>(sp =>
     sp.GetRequiredKeyedService<IConnectionMultiplexer>("orleans-redis"));
 
@@ -107,16 +108,18 @@ builder.UseOrleans(siloBuilder =>
     if (!string.IsNullOrEmpty(orleansRedisConnection))
     {
         siloBuilder.UseRedisClustering(orleansRedisConnection);
-        siloBuilder.AddRedisGrainStorage("PubSubStore",
-            options => options.ConfigurationOptions =
-                ConfigurationOptions.Parse(orleansRedisConnection));
         siloBuilder.UseInMemoryReminderService();
     }
 
     // Redis Streams as the stream provider — durable, multi-silo-safe, reuses the same
-    // orleans-redis connection that powers clustering + PubSubStore. Matches the Fleans
-    // engine's default (v0.3.0+). For an in-process single-silo demo, swap for AddMemoryStreams.
-    siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create, null);
+    // orleans-redis connection as clustering. Matches the Fleans engine's default (v0.3.0+).
+    // For an in-process single-silo demo, swap for AddMemoryStreams.
+    //
+    // Implicit-only pub-sub, like the engine (nightBaker/fleans#912): handlers subscribe via
+    // [ImplicitStreamSubscription], so there is no rendezvous grain and no PubSubStore. Every
+    // silo of the cluster must use the same type — a mixed cluster loses events.
+    siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create,
+        b => b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly));
 });
 
 // ─── Plugin registration ──────────────────────────────────────────────────────────────

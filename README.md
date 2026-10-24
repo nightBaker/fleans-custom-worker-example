@@ -167,15 +167,14 @@ builder.Services.AddMyTaskPlugin(); // <- add this
 
 ### Choosing providers (storage + streaming)
 
-A plugin host needs three Orleans pieces wired before it can join the engine's cluster: a **clustering** backend (membership table), a **`PubSubStore`** grain storage (so stream consumers can find producers' subscriptions), and a **stream provider** (the actual transport for custom-task events). Plus optionally a **reminder service** if your plugin uses Orleans reminders.
+A plugin host needs two Orleans pieces wired before it can join the engine's cluster: a **clustering** backend (membership table) and a **stream provider** (the actual transport for custom-task events). Plus optionally a **reminder service** if your plugin uses Orleans reminders. Streams are **implicit-only** (`StreamPubSubType.ImplicitOnly`, since nightBaker/fleans#912): handlers subscribe through `[ImplicitStreamSubscription]`, so there is no `PubSubStore` grain storage to wire.
 
-The default template wires all four to Redis — durable, single shared connection, matches the engine v0.4.0 default. You don't have to use Redis everywhere, but two of the four pieces are tied to the engine's choice:
+The default template wires all three to Redis — durable, single shared connection, matches the engine default. You don't have to use Redis everywhere, but clustering and streaming are tied to the engine's choice:
 
 | Piece | Engine-host coupling | Why |
 |---|---|---|
 | **Clustering** (`UseRedisClustering` / equivalent) | Must **share the cluster** (same `ClusterId` + `ServiceId` + same MembershipTable backend), but can be any Orleans-supported backend | Plugin host needs to join the engine's gossip ring |
-| **`PubSubStore`** grain storage | **MUST match the engine's choice and storage name** (`PubSubStore`) | Consumers (plugin host) find producers' (engine) subscription registrations through this store. Cross-backend stores can't see each other. |
-| **Stream provider** (name + backend) | **MUST match the engine** (provider name = `StreamProvider`, same backend) | Producer and consumer have to be on the same transport |
+| **Stream provider** (name + backend + pub-sub type) | **MUST match the engine** (provider name = `StreamProvider`, same backend, `ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly)`) | Producer and consumer have to be on the same transport. A silo on the Orleans default pub-sub type (explicit + implicit) activates rendezvous grains that need a `PubSubStore` the engine no longer registers, so a mixed cluster loses events |
 | **Reminder service** | Independent | Only matters for plugins that schedule their own reminders. In-memory is fine for stateless plugins. |
 
 The Fleans engine reads its provider choices from configuration (`Fleans:Streaming:Provider`, `Persistence:Provider`, etc.). To match it, set the **same values** in your plugin host's environment when both run against the same release artifacts. The Helm chart's `streaming.provider` / `persistence.provider` knobs (Fleans v0.4.0+) drive the engine; this template's `Program.cs` wires the host to match.
@@ -188,28 +187,24 @@ What the template ships:
 // Clustering (Orleans membership table)
 siloBuilder.UseRedisClustering(orleansRedisConnection);
 
-// PubSubStore grain storage — the storage NAME ("PubSubStore") MUST be exactly this
-siloBuilder.AddRedisGrainStorage("PubSubStore",
-    options => options.ConfigurationOptions = ConfigurationOptions.Parse(orleansRedisConnection));
-
 // Reminder service — in-memory; swap if your plugins use Orleans reminders
 siloBuilder.UseInMemoryReminderService();
 
-// Stream provider — name "StreamProvider" MUST match the engine's wiring
-siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create, null);
+// Stream provider — name "StreamProvider" and implicit-only pub-sub MUST match the engine
+siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create,
+    b => b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly));
 ```
 
-**Production requirement:** Redis must have persistence (AOF or RDB) enabled. Without it, a Redis restart loses in-flight stream messages AND every silo's PubSubStore subscription registry — the same caveat operators already have for the engine.
+**Production requirement:** Redis must have persistence (AOF or RDB) enabled. Without it, a Redis restart loses in-flight stream messages — the same caveat operators already have for the engine.
 
-#### Storage alternatives (clustering + PubSubStore + reminders)
+#### Storage alternatives (clustering + reminders)
 
 ##### Postgres / SQL Server (ADO.NET)
 
-Add the NuGets and swap the calls. The engine MUST also be on the same SQL-backed PubSubStore (Fleans persistence is independent from this — `Persistence:Provider` controls workflow-state Postgres; the Orleans PubSubStore is a separate concern):
+Add the NuGets and swap the calls. Clustering must use the same membership table as the engine:
 
 ```xml
 <PackageReference Include="Microsoft.Orleans.Clustering.AdoNet" Version="10.0.1" />
-<PackageReference Include="Microsoft.Orleans.Persistence.AdoNet" Version="10.0.1" />
 <PackageReference Include="Microsoft.Orleans.Reminders.AdoNet" Version="10.0.1" />
 <PackageReference Include="Npgsql" Version="9.0.3" />
 ```
@@ -217,11 +212,6 @@ Add the NuGets and swap the calls. The engine MUST also be on the same SQL-backe
 ```csharp
 var adoConn = builder.Configuration.GetConnectionString("orleans");
 siloBuilder.UseAdoNetClustering(opts => { opts.Invariant = "Npgsql"; opts.ConnectionString = adoConn; });
-siloBuilder.AddAdoNetGrainStorage("PubSubStore", opts =>
-{
-    opts.Invariant = "Npgsql";
-    opts.ConnectionString = adoConn;
-});
 siloBuilder.UseAdoNetReminderService(opts => { opts.Invariant = "Npgsql"; opts.ConnectionString = adoConn; });
 ```
 
@@ -231,21 +221,18 @@ Operators must apply the [Orleans AdoNet schema scripts](https://learn.microsoft
 
 ```xml
 <PackageReference Include="Microsoft.Orleans.Clustering.AzureStorage" Version="10.0.1" />
-<PackageReference Include="Microsoft.Orleans.Persistence.AzureStorage" Version="10.0.1" />
 <PackageReference Include="Microsoft.Orleans.Reminders.AzureStorage" Version="10.0.1" />
 ```
 
 ```csharp
 var azureConn = builder.Configuration.GetConnectionString("orleans-azure-tables");
 siloBuilder.UseAzureStorageClustering(opts => opts.ConfigureTableServiceClient(azureConn));
-siloBuilder.AddAzureTableGrainStorage("PubSubStore", opts =>
-    opts.ConfigureTableServiceClient(azureConn));
 siloBuilder.UseAzureTableReminderService(opts => opts.ConfigureTableServiceClient(azureConn));
 ```
 
 ##### Mix-and-match
 
-It's fine — and sometimes desirable — to mix backends. The most common pattern is **Redis clustering + Redis PubSubStore + Redis streams + in-memory reminders**: minimum infrastructure, matches the engine default. Another reasonable pattern is **AdoNet clustering + AdoNet PubSubStore** (when operators already run Postgres and want one fewer dependency) — but then the engine must also use AdoNet for the same pieces.
+It's fine — and sometimes desirable — to mix backends. The most common pattern is **Redis clustering + Redis streams + in-memory reminders**: minimum infrastructure, matches the engine default. Another reasonable pattern is **AdoNet clustering** (when operators already run Postgres) — but then the engine must use the same membership table.
 
 #### Streaming alternatives
 
@@ -254,7 +241,7 @@ The provider **name** must match the engine's (`StreamProvider`). The **backend*
 ##### Memory (single-silo debug only — DO NOT use in multi-host)
 
 ```csharp
-siloBuilder.AddMemoryStreams("StreamProvider");
+siloBuilder.AddMemoryStreams("StreamProvider", b => b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly));
 ```
 
 Messages don't leave the process. Both the engine and the plugin host would have to be a single combined silo for this to work end-to-end — which defeats the point of running an external plugin host. Useful only for local in-process plugin-development before you put a real broker in.
@@ -269,6 +256,7 @@ Messages don't leave the process. Both the engine and the plugin host would have
 siloBuilder.AddKafkaStreams("StreamProvider", b =>
 {
     b.ConfigureKafka(builder.Configuration.GetSection("Fleans:Streaming:Kafka"));
+    b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly);
 });
 ```
 
@@ -302,6 +290,7 @@ siloBuilder.AddAzureQueueStreams("StreamProvider", b =>
             ];
         });
     });
+    b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly);
 });
 ```
 
