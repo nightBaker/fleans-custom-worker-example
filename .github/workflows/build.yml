@@ -17,14 +17,13 @@ jobs:
       - run: dotnet restore src/Fleans.CustomWorkerHost
       - run: dotnet build src/Fleans.CustomWorkerHost --no-restore --configuration Release
 
-      # Leaf-package guard: verify engine internals never sneak into the dep closure.
-      # This is the structural invariant that justifies hosting plugins out-of-process.
-      - name: Verify no engine-internal transitive packages
+      # A worker takes no dependency on Orleans or on engine internals, directly or transitively.
+      - name: Verify the dependency closure
         run: |
           set -euo pipefail
           deps=$(dotnet list src/Fleans.CustomWorkerHost package --include-transitive)
-          if echo "$deps" | grep -E '> Fleans\.(Application|Domain|Infrastructure|Persistence)( |$)' | grep -v '\.Abstractions '; then
-            echo "::error::Engine-internal package leaked into transitive closure — leaf-package design broken"
+          if echo "$deps" | grep -iE '> (Microsoft\.Orleans|Fleans\.(Application|Domain|Infrastructure|Persistence|Worker))'; then
+            echo "::error::Orleans or an engine package leaked into the dependency closure"
             exit 1
           fi
-          echo "OK — dep closure contains only Fleans.*.Abstractions / Worker / Plugins.*"
+          echo "OK: Fleans.ExternalTasks.Sdk only"

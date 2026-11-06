@@ -1,4 +1,4 @@
-using Fleans.Application.CustomTasks;
+using Fleans.ExternalTasks.Sdk;
 
 namespace Fleans.Plugins.HelloWorld;
 
@@ -13,12 +13,12 @@ namespace Fleans.Plugins.HelloWorld;
 /// </summary>
 public static class HelloWorldSchema
 {
-    public static readonly CustomTaskParameterSchema Default = new(new[]
+    public static readonly ExternalTaskParameterSchema Default = new(new[]
     {
-        new CustomTaskParameterSpec(
+        new ExternalTaskParameter(
             Name: "name",
             DisplayName: "Name",
-            Type: CustomTaskParameterType.String,
+            Type: ExternalTaskParameterType.String,
             Required: false,
             Description: "Who to greet. Defaults to \"world\" when omitted. Source from a workflow variable with =myVar.",
             DefaultValue: "world")
