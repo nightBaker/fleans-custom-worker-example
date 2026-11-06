@@ -5,15 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>14</LangVersion>
-    <!-- This project demonstrates the "author your own custom-task plugin" pattern.
-         Direct dependency closure: Fleans.Worker (the leaf NuGet that carries
-         CustomTaskHandlerBase + AddCustomTaskPlugin + [ImplicitStreamSubscription]
-         attribute marker). Transitively brings Fleans.Application.Abstractions +
-         Fleans.Domain.Abstractions only — NO engine internals. -->
+    <!-- This project demonstrates authoring a custom-task handler. Its one Fleans dependency is
+         Fleans.ExternalTasks.Sdk, which brings no Orleans and no engine internals. -->
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Fleans.Worker" Version="0.5.0" />
+    <PackageReference Include="Fleans.ExternalTasks.Sdk" Version="0.11.0" />
   </ItemGroup>
 
 </Project>

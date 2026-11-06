@@ -1,120 +1,94 @@
 # fleans-custom-worker-example
 
-Worked example: hosting custom-task plugins for [Fleans](https://github.com/nightBaker/fleans), the Orleans-based BPMN workflow engine.
+Worked example: a custom-task worker for [Fleans](https://github.com/nightBaker/fleans), the BPMN workflow engine.
 
-Click **Use this template** above to start your own plugin host.
+Click **Use this template** above to start your own worker.
 
 ## What this is
 
-`Fleans.CustomWorkerHost` is a minimum-viable Orleans silo that runs custom-task plugin handlers outside the Fleans engine. The silo tags itself with `Fleans:Role=Plugin` (silo-name prefix `plugin-`) and relies on Orleans' built-in `GetCompatibleSilos` to host **only** the plugin grain classes compiled into its assembly load context — engine-internal grains (Script, Condition) and other hosts' plugins never land here.
+`Fleans.CustomWorkerHost` is a minimal generic host that connects to a Fleans API over gRPC, receives the tasks of the `<serviceTask type="...">` values it registers, and reports their outcome. It joins no cluster and shares no database, stream or Redis with the engine: its whole configuration is the API's URL.
 
-The dependency closure is intentionally tight: `Fleans.Worker` (leaf NuGet) + plugin packages + Orleans server + Aspire telemetry. **No reference to `Fleans.Application` / `Fleans.Domain` / `Fleans.Persistence`** — that structural guarantee is the whole point of Fleans' leaf-package design.
+The dependency closure is `Fleans.ExternalTasks.Sdk` plus your plugins. **No Orleans and no engine projects**, and CI guards it. Anything that can speak the [gRPC protocol](https://github.com/nightBaker/fleans/blob/main/src/Fleans/Fleans.ExternalTasks.Sdk/Protos/external_task_worker.proto) can do the same in another language.
 
-> **Breaking change (Fleans v0.3.0+).** Earlier versions of this template used `Fleans:Role=Worker`, which made plugin hosts attract engine grains they didn't sign up for. Hosts on Fleans v0.3.0+ must use `Fleans:Role=Plugin` — call `siloBuilder.AddFleansPluginHost(configuration)` and the role default + validation are handled for you.
->
-> **Breaking change (Fleans v0.4.0+).** Plugin handlers must declare `[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.<taskType>")]` as a **literal string** with the task-type baked in — not `[ImplicitStreamSubscription(WorkflowEventStreams.ExecuteCustomTaskStreamNamespace)]`. v0.4.0's per-task-type stream sharding (#566) routes events to `events.ExecuteCustomTaskEvent.<taskType>`; a handler subscribed to the bare namespace receives no events, and `AddCustomTaskPlugin<T>` throws `InvalidOperationException` at silo startup if the attribute literal doesn't match the registered task-type. See the updated example below.
->
-> v0.4.0 also routes `OperationCanceledException` from the supplied grain-lifetime `CancellationToken` as a redelivery hint (NOT a failure) — plugin authors should `await` against the token (`HttpClient.SendAsync(req, ct)`, `Task.Delay(timeout, ct)`, …) so the grain can deactivate cleanly during silo shutdown. The example below shows the pattern.
->
-> **Fleans v0.5.0+ enforcement.** `PlacementRoleAssertion` ([nightBaker/fleans#457](https://github.com/nightBaker/fleans/issues/457)) now fails fast at silo startup if `Fleans:Role` config and the grain placement attribute disagree. `AddFleansPluginHost` sets `Fleans:Role=Plugin` for you, so existing configurations continue to work — but if you wire role configuration manually, the silo throws at startup instead of silently misrouting grains.
-
-> **Workaround for Fleans v0.5.0 and earlier ([nightBaker/fleans#703](https://github.com/nightBaker/fleans/issues/703)).** This template explicitly sets `EndpointOptions.GatewayPort = 0` in `Program.cs` right after `AddFleansPluginHost`. Without this, plugin host silos advertise themselves as Orleans client gateways. Fleans.Web is an Orleans client (`UseOrleansClient`) and round-robins among advertised gateways; when it picks this plugin silo and forwards an engine grain call through it, the gateway throws `Unable to load Fleans.Application.Grains.IWorkflowInstanceGrain, Fleans.Application` because the plugin host's assembly load context lacks `Fleans.Application` by design. The engine-side fix in `AddFleansPluginHost` lands in the Fleans release after v0.5.0 — delete the `Configure<EndpointOptions>` block in `Program.cs` once you upgrade past it.
+> **Breaking change (Fleans 0.11.0).** Plugin silos are gone (nightBaker/fleans#1013). `CustomTaskHandlerBase`, `AddCustomTaskPlugin<T>`, `AddFleansPluginHost` and the `Fleans.Worker` package no longer exist. To move a handler over: derive from `ExternalTaskHandler`, drop `[ImplicitStreamSubscription]` and the grain constructor arguments, throw `ExternalTaskFailedException` instead of `CustomTaskFailedActivityException`, register with `AddExternalTaskHandler<T>`, and replace the host's silo wiring with `AddFleansExternalTaskWorker()`.
 
 ## Quick start
 
 ```bash
 # 1. Use this template to create your own repo, then clone it.
-gh repo create my-plugin-host --template nightBaker/fleans-custom-worker-example --public
-cd my-plugin-host
+gh repo create my-worker --template nightBaker/fleans-custom-worker-example --public
+cd my-worker
 
-# 2. Run against an Orleans Redis (started by the Fleans Aspire AppHost or your own).
-#    Fleans:Role defaults to "Plugin" via AddFleansPluginHost — no need to set it.
-ConnectionStrings__orleans-redis="localhost:6379" dotnet run --project src/Fleans.CustomWorkerHost
+# 2. Run it against a Fleans API.
+Fleans__ExternalTaskWorker__EngineUrl="http://localhost:8080" dotnet run --project src/Fleans.CustomWorkerHost
 ```
 
-The host ships with one worked-example plugin — `Fleans.Plugins.HelloWorld` (see [`src/Fleans.Plugins.HelloWorld/`](src/Fleans.Plugins.HelloWorld)) — which claims `<serviceTask type="hello-world">` and returns `__response.message = "Hello, {name}!"`. Deploy a BPMN that uses it on the engine, trigger a workflow, and the call executes here, not on the engine silos.
+The worker ships with one worked example, `Fleans.Plugins.HelloWorld` (see [`src/Fleans.Plugins.HelloWorld/`](src/Fleans.Plugins.HelloWorld)), which claims `<serviceTask type="hello-world">` and returns `__response.message = "Hello, {name}!"`. Once connected, the type appears in the engine's custom-task catalog and the editor's palette.
 
-To host the pre-built REST-call plugin (`Fleans.Plugins.RestCaller`, ships with the Fleans engine) instead of (or alongside) Hello World, add `<PackageReference Include="Fleans.Plugins.RestCaller" Version="0.5.0" />` to `Fleans.CustomWorkerHost.csproj` and call `builder.Services.AddRestCallerPlugin();` in `Program.cs`.
+To run the ready-made REST caller as well, add a `PackageReference` to `Fleans.Plugins.RestCaller` and call `builder.Services.AddRestCallerPlugin();` in `Program.cs`.
 
 ## The Hello World plugin (the worked example)
 
-The template ships with the smallest-possible plugin so the structure is obvious. Three files in `src/Fleans.Plugins.HelloWorld/`:
+Three files in `src/Fleans.Plugins.HelloWorld/`:
 
-- **`HelloWorldHandler.cs`** — the handler grain. Reads `name` from inputs, returns `__response.message`.
-- **`HelloWorldSchema.cs`** — the parameter schema the Fleans editor renders when an author selects this task type.
-- **`HelloWorldServiceCollectionExtensions.cs`** — the DI extension `AddHelloWorldPlugin()` the host calls.
+- **`HelloWorldHandler.cs`**: the handler. Reads `name` from inputs, returns `__response.message`.
+- **`HelloWorldSchema.cs`**: the parameter schema the Fleans editor renders when an author selects this task type.
+- **`HelloWorldServiceCollectionExtensions.cs`**: the DI extension `AddHelloWorldPlugin()` the host calls.
 
-The handler in full:
+The core of the handler:
 
 ```csharp
-// src/Fleans.Plugins.HelloWorld/HelloWorldHandler.cs
-using System.Dynamic;
-using Fleans.Worker.CustomTasks;
-using Microsoft.Extensions.Logging;
-
-// No [WorkerPlacement] — plugin handlers use Orleans default placement, which
-// auto-filters via GetCompatibleSilos to silos that have this DLL loaded.
-//
-// The [ImplicitStreamSubscription] literal MUST equal
-// $"events.ExecuteCustomTaskEvent.{TaskType}" — the per-task-type stream namespace
-// the Fleans v0.4.0 publisher fires on (#566). Attribute arguments must be
-// compile-time constants, so each plugin hard-codes its own literal — keep the
-// task-type segment here in sync with the TaskType property below AND with the
-// taskType passed to AddCustomTaskPlugin<T>(...). AddCustomTaskPlugin validates
-// all three at silo startup and throws on drift.
-[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.hello-world")]
-public sealed class HelloWorldHandler : CustomTaskHandlerBase
+public sealed partial class HelloWorldHandler(ILogger<HelloWorldHandler> logger) : ExternalTaskHandler
 {
     public const string HelloWorldTaskType = "hello-world";
 
-    private readonly ILogger<HelloWorldHandler> _logger;
-
-    public HelloWorldHandler(ILogger<HelloWorldHandler> logger, IGrainFactory grainFactory)
-        : base(logger, grainFactory) { _logger = logger; }
-
-    protected override string TaskType => HelloWorldTaskType;
-
-    protected override Task<IDictionary<string, object?>> ExecuteAsync(
+    public override Task<IDictionary<string, object?>> ExecuteAsync(
         IDictionary<string, object?> resolvedInputs,
         ExpandoObject variables,
-        CustomTaskExecutionContext context,
+        ExternalTaskContext context,
         CancellationToken cancellationToken)
     {
-        // Honor the supplied CancellationToken — v0.4.0 (#568) treats an OCE from
-        // this token as a redelivery hint, NOT a task failure. For real plugins
-        // that do I/O, pass cancellationToken to every awaitable.
         cancellationToken.ThrowIfCancellationRequested();
 
         var name = (resolvedInputs.TryGetValue("name", out var raw) ? raw?.ToString() : null) ?? "world";
-        var message = $"Hello, {name}!";
 
         IDictionary<string, object?> result = new Dictionary<string, object?>
         {
-            ["__response"] = new Dictionary<string, object?> { ["message"] = message }
+            ["__response"] = new Dictionary<string, object?> { ["message"] = $"Hello, {name}!" }
         };
         return Task.FromResult(result);
     }
 }
 ```
 
-The DI registration:
+The registration:
 
 ```csharp
-// src/Fleans.Plugins.HelloWorld/HelloWorldServiceCollectionExtensions.cs
 public static IServiceCollection AddHelloWorldPlugin(this IServiceCollection services) =>
-    services.AddCustomTaskPlugin<HelloWorldHandler>(
+    services.AddExternalTaskHandler<HelloWorldHandler>(
         taskType: HelloWorldHandler.HelloWorldTaskType,
         displayName: "Hello World",
         parameterSchema: HelloWorldSchema.Default);
 ```
 
-The Program.cs wiring is one line:
+And `Program.cs`:
 
 ```csharp
+builder.Services.AddFleansExternalTaskWorker();
 builder.Services.AddHelloWorldPlugin();
 ```
 
-### Try it end-to-end
+## What a handler must get right
+
+- **Be idempotent.** Delivery is at-least-once: after a dropped connection or a timeout the task runs again, possibly on another worker. Key external side effects by `context.ActivityInstanceId`, which stays the same across deliveries.
+- **Pass on the `CancellationToken`.** It fires when the engine stops waiting, the connection drops or the host stops. The task is then delivered again, so an `OperationCanceledException` from it is not a failure.
+- **Fail with a code.** `throw new ExternalTaskFailedException("DECLINED", "card declined")` reaches an error boundary declaring `DECLINED`. Any other exception fails the task with code `500`.
+- **Return JSON-serializable values.** Inputs, variables and results cross the wire as JSON.
+- **Report later, if the work outlives the handler.** Return `Deferred` to leave the activity open with no timeout, then settle it with `POST /Execution/complete-activity` or `fail-activity`. A worker registered as `scheme:*` gets every type starting with `scheme:`; those wildcards aren't listed in the catalog.
+
+A task type with no connected worker waits for one, within the engine's stream delivery window.
+
+## Try it end-to-end
 
 Deploy this BPMN on the Fleans engine:
 
@@ -139,7 +113,7 @@ Deploy this BPMN on the Fleans engine:
 </bpmn:definitions>
 ```
 
-Start an instance via `POST /Execution/start {"WorkflowId":"hello-smoke"}` and inspect the result — `greeting` will be `"Hello, Alice!"`, executed on this plugin host (EventId 4035 `Custom-task handler activated` lands in the plugin-host logs, not the engine's).
+Start an instance via `POST /Execution/start {"WorkflowId":"hello-smoke"}` and inspect the result — `greeting` will be `"Hello, Alice!"`, executed by this worker (its log shows `Greeted Alice`).
 
 ## Customizing
 
@@ -149,14 +123,8 @@ Use the Hello World project as a template:
 
 ```bash
 cp -r src/Fleans.Plugins.HelloWorld src/Fleans.Plugins.MyTask
-# rename namespaces + handler class + task-type literal in the 3 files
+# rename namespaces + handler class + task type in the 3 files
 ```
-
-The three things that MUST stay in lock-step (v0.4.0 startup validation enforces this):
-
-1. **`[ImplicitStreamSubscription("events.ExecuteCustomTaskEvent.<taskType>")]` literal** on the handler.
-2. **`TaskType` property** returning the same string.
-3. **`taskType:` argument** to `AddCustomTaskPlugin<T>(...)`.
 
 Then in `Program.cs`:
 
@@ -165,150 +133,28 @@ builder.Services.AddHelloWorldPlugin();
 builder.Services.AddMyTaskPlugin(); // <- add this
 ```
 
-### Choosing providers (storage + streaming)
+### Worker settings
 
-A plugin host needs two Orleans pieces wired before it can join the engine's cluster: a **clustering** backend (membership table) and a **stream provider** (the actual transport for custom-task events). Plus optionally a **reminder service** if your plugin uses Orleans reminders. Streams are **implicit-only** (`StreamPubSubType.ImplicitOnly`, since nightBaker/fleans#912): handlers subscribe through `[ImplicitStreamSubscription]`, so there is no `PubSubStore` grain storage to wire.
+Bound from `Fleans:ExternalTaskWorker` (environment: `Fleans__ExternalTaskWorker__*`):
 
-The default template wires all three to Redis — durable, single shared connection, matches the engine default. You don't have to use Redis everywhere, but clustering and streaming are tied to the engine's choice:
-
-| Piece | Engine-host coupling | Why |
+| Setting | Default | Meaning |
 |---|---|---|
-| **Clustering** (`UseRedisClustering` / equivalent) | Must **share the cluster** (same `ClusterId` + `ServiceId` + same MembershipTable backend), but can be any Orleans-supported backend | Plugin host needs to join the engine's gossip ring |
-| **Stream provider** (name + backend + pub-sub type) | **MUST match the engine** (provider name = `StreamProvider`, same backend, `ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly)`) | Producer and consumer have to be on the same transport. A silo on the Orleans default pub-sub type (explicit + implicit) activates rendezvous grains that need a `PubSubStore` the engine no longer registers, so a mixed cluster loses events |
-| **Reminder service** | Independent | Only matters for plugins that schedule their own reminders. In-memory is fine for stateless plugins. |
+| `EngineUrl` | *required* | The Fleans API base URL. |
+| `WorkerName` | `{machine}-{process id}` | The name the catalog lists this worker under; unique per process. |
+| `UseGrpcWeb` | `true` | gRPC-Web over HTTP/1.1, which works against any API endpoint. `false` for an HTTP/2 endpoint. |
+| `AccessToken` | none | Bearer token, for an API with authentication on. |
+| `MaxConcurrentTasks` | `32` | Tasks run at the same time in this process. |
+| `ReconnectDelay` | `00:00:05` | Pause before re-subscribing after the connection drops. |
 
-The Fleans engine reads its provider choices from configuration (`Fleans:Streaming:Provider`, `Persistence:Provider`, etc.). To match it, set the **same values** in your plugin host's environment when both run against the same release artifacts. The Helm chart's `streaming.provider` / `persistence.provider` knobs (Fleans v0.4.0+) drive the engine; this template's `Program.cs` wires the host to match.
+Run as many replicas as you like: tasks are shared among the connected workers of a type.
 
-#### Default: Redis everywhere (recommended)
-
-What the template ships:
-
-```csharp
-// Clustering (Orleans membership table)
-siloBuilder.UseRedisClustering(orleansRedisConnection);
-
-// Reminder service — in-memory; swap if your plugins use Orleans reminders
-siloBuilder.UseInMemoryReminderService();
-
-// Stream provider — name "StreamProvider" and implicit-only pub-sub MUST match the engine
-siloBuilder.AddPersistentStreams(StreamProviderName, RedisStreamFactory.Create,
-    b => b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly));
-```
-
-**Production requirement:** Redis must have persistence (AOF or RDB) enabled. Without it, a Redis restart loses in-flight stream messages — the same caveat operators already have for the engine.
-
-#### Storage alternatives (clustering + reminders)
-
-##### Postgres / SQL Server (ADO.NET)
-
-Add the NuGets and swap the calls. Clustering must use the same membership table as the engine:
-
-```xml
-<PackageReference Include="Microsoft.Orleans.Clustering.AdoNet" Version="10.0.1" />
-<PackageReference Include="Microsoft.Orleans.Reminders.AdoNet" Version="10.0.1" />
-<PackageReference Include="Npgsql" Version="9.0.3" />
-```
-
-```csharp
-var adoConn = builder.Configuration.GetConnectionString("orleans");
-siloBuilder.UseAdoNetClustering(opts => { opts.Invariant = "Npgsql"; opts.ConnectionString = adoConn; });
-siloBuilder.UseAdoNetReminderService(opts => { opts.Invariant = "Npgsql"; opts.ConnectionString = adoConn; });
-```
-
-Operators must apply the [Orleans AdoNet schema scripts](https://learn.microsoft.com/dotnet/orleans/host/configuration-guide/adonet-configuration) to the database before first start.
-
-##### Azure Storage Tables
-
-```xml
-<PackageReference Include="Microsoft.Orleans.Clustering.AzureStorage" Version="10.0.1" />
-<PackageReference Include="Microsoft.Orleans.Reminders.AzureStorage" Version="10.0.1" />
-```
-
-```csharp
-var azureConn = builder.Configuration.GetConnectionString("orleans-azure-tables");
-siloBuilder.UseAzureStorageClustering(opts => opts.ConfigureTableServiceClient(azureConn));
-siloBuilder.UseAzureTableReminderService(opts => opts.ConfigureTableServiceClient(azureConn));
-```
-
-##### Mix-and-match
-
-It's fine — and sometimes desirable — to mix backends. The most common pattern is **Redis clustering + Redis streams + in-memory reminders**: minimum infrastructure, matches the engine default. Another reasonable pattern is **AdoNet clustering** (when operators already run Postgres) — but then the engine must use the same membership table.
-
-#### Streaming alternatives
-
-The provider **name** must match the engine's (`StreamProvider`). The **backend** must match — both producer and consumer transit messages over the same physical broker.
-
-##### Memory (single-silo debug only — DO NOT use in multi-host)
-
-```csharp
-siloBuilder.AddMemoryStreams("StreamProvider", b => b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly));
-```
-
-Messages don't leave the process. Both the engine and the plugin host would have to be a single combined silo for this to work end-to-end — which defeats the point of running an external plugin host. Useful only for local in-process plugin-development before you put a real broker in.
-
-##### Kafka
-
-```xml
-<PackageReference Include="Microsoft.Orleans.Streaming.Kafka" Version="10.0.1" />
-```
-
-```csharp
-siloBuilder.AddKafkaStreams("StreamProvider", b =>
-{
-    b.ConfigureKafka(builder.Configuration.GetSection("Fleans:Streaming:Kafka"));
-    b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly);
-});
-```
-
-Configuration (env vars):
-
-```
-Fleans__Streaming__Kafka__Brokers=kafka.kafka.svc:9092
-Fleans__Streaming__Kafka__ConsumerGroup=fleans
-Fleans__Streaming__Kafka__TopicPrefix=fleans-
-```
-
-The defaults match the engine: consumer group `fleans`, topics `fleans-0` through `fleans-7` (8 topics, one per Orleans stream queue). The engine must be configured with the **same** broker list, consumer group, and topic prefix.
-
-##### Azure Queue Storage (Azurite locally / Storage Queue in production)
-
-```xml
-<PackageReference Include="Microsoft.Orleans.Streaming.AzureStorage" Version="10.0.1" />
-```
-
-```csharp
-siloBuilder.AddAzureQueueStreams("StreamProvider", b =>
-{
-    b.ConfigureAzureQueue(opts =>
-    {
-        opts.Configure<IConfiguration>((o, cfg) =>
-        {
-            o.ConfigureQueueServiceClient(cfg["Fleans:Streaming:AzureQueue:ConnectionString"]);
-            o.QueueNames = [
-                "fleans-stream-0", "fleans-stream-1", "fleans-stream-2", "fleans-stream-3",
-                "fleans-stream-4", "fleans-stream-5", "fleans-stream-6", "fleans-stream-7"
-            ];
-        });
-    });
-    b.ConfigureStreamPubSub(StreamPubSubType.ImplicitOnly);
-});
-```
-
-The engine uses queue names `fleans-stream-0` through `fleans-stream-7`. The plugin host's `QueueNames` list MUST be exactly the same (same length, same names) — Orleans hashes Stream IDs across the list, and any mismatch results in producers writing to queues the consumer doesn't poll.
-
-#### Cross-references
-
-- The Fleans engine's `Fleans.ServiceDefaults/FleanStreamingExtensions.cs` is the canonical implementation of the streaming-provider switch — read it if you need to match an engine deployment exactly.
-- The engine-side configuration knobs (`Fleans:Streaming:Provider`, `Fleans:Streaming:Kafka:Brokers`, etc.) are documented at [Fleans / Configuration](https://nightbaker.github.io/fleans/reference/configuration/) and [Fleans / Streaming](https://nightbaker.github.io/fleans/reference/streaming/).
-- The Helm chart's `streaming.provider` / `persistence.provider` / `postgres.enabled` knobs drive the engine in production; mirror their effective values in this host's environment.
-
-## Verifying the leaf-package promise
+## Verifying the dependency closure
 
 ```bash
-dotnet list package --include-transitive --project src/Fleans.CustomWorkerHost | grep -i fleans
+dotnet list src/Fleans.CustomWorkerHost package --include-transitive | grep -iE 'fleans|orleans'
 ```
 
-You should see only `Fleans.Application.Abstractions`, `Fleans.Domain.Abstractions`, `Fleans.Worker`, and your plugin packages or in-repo plugin projects (this template's `Fleans.Plugins.HelloWorld`). **No `Fleans.Application` or `Fleans.Domain`** — those stay engine-internal.
+You should see only `Fleans.ExternalTasks.Sdk`, and no `Microsoft.Orleans.*`.
 
 ## License
 
@@ -316,6 +162,6 @@ PolyForm Internal Use 1.0.0 — matches the [Fleans engine license](https://gith
 
 ## Related
 
-- **[Fleans engine](https://github.com/nightBaker/fleans)** — the BPMN workflow engine this host plugs into.
-- **[Custom tasks documentation](https://nightbaker.github.io/fleans/concepts/custom-tasks/)** — full plugin-authoring guide.
+- **[Fleans engine](https://github.com/nightBaker/fleans)** — the BPMN workflow engine this worker connects to.
+- **[Custom tasks documentation](https://nightbaker.github.io/fleans/concepts/custom-tasks/)** — the full authoring guide.
 - **[Self-hosting guides](https://nightbaker.github.io/fleans/guides/)** — docker-compose and Helm deployment.
